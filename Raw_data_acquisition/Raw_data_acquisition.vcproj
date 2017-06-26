@@ -183,6 +183,10 @@
 			UniqueIdentifier="{93995380-89BD-4b04-88EB-625FBE52EBFB}"
 			>
 			<File
+				RelativePath=".\opencvref.h"
+				>
+			</File>
+			<File
 				RelativePath=".\resource.h"
 				>
 			</File>
@@ -198,6 +202,18 @@
 			>
 			<File
 				RelativePath=".\Raw_data_acquisition.rc"
+				>
+			</File>
+		</Filter>
+		<Filter
+			Name="videoproc"
+			>
+			<File
+				RelativePath=".\Videoproc.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\Videoproc.h"
 				>
 			</File>
 		</Filter>
