@@ -1,0 +1,38 @@
+// VideoSourcex.idl : VideoSourcex 的 IDL 源
+//
+
+// 此文件将由 MIDL 工具处理以
+// 产生类型库(VideoSourcex.tlb)和封送处理代码。
+
+import "oaidl.idl";
+import "ocidl.idl";
+
+[
+	object,
+	uuid(214F2657-A779-4DE6-9356-7BA705E799F0),
+	dual,
+	nonextensible,
+	helpstring("ICStrmSr 接口"),
+	pointer_default(unique)
+]
+interface ICStrmSr : IDispatch{
+	[id(1), helpstring("方法PlayVideo")] HRESULT PlayVideo(void);
+	[id(2), helpstring("方法PlayVideoOnWnd")] HRESULT PlayVideoOnWnd(OLE_HANDLE hwnd);
+};
+[
+	uuid(61B452B0-FDC0-4C2A-971C-E62C3D47AF03),
+	version(1.0),
+	helpstring("VideoSourcex 1.0 类型库")
+]
+library VideoSourcexLib
+{
+	importlib("stdole2.tlb");
+	[
+		uuid(63B646DE-B566-40AA-AB00-0AB8D0A25630),
+		helpstring("CStrmSr Class")
+	]
+	coclass CStrmSr
+	{
+		[default] interface ICStrmSr;
+	};
+};

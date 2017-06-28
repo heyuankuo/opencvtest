@@ -1,0 +1,26 @@
+HKCR
+{
+	VideoSourcex.CStrmSr.1 = s 'CStrmSr Class'
+	{
+		CLSID = s '{63B646DE-B566-40AA-AB00-0AB8D0A25630}'
+	}
+	VideoSourcex.CStrmSr = s 'CStrmSr Class'
+	{
+		CLSID = s '{63B646DE-B566-40AA-AB00-0AB8D0A25630}'
+		CurVer = s 'VideoSourcex.CStrmSr.1'
+	}
+	NoRemove CLSID
+	{
+		ForceRemove {63B646DE-B566-40AA-AB00-0AB8D0A25630} = s 'CStrmSr Class'
+		{
+			ProgID = s 'VideoSourcex.CStrmSr.1'
+			VersionIndependentProgID = s 'VideoSourcex.CStrmSr'
+			ForceRemove 'Programmable'
+			InprocServer32 = s '%MODULE%'
+			{
+				val ThreadingModel = s 'Apartment'
+			}
+			'TypeLib' = s '{61B452B0-FDC0-4C2A-971C-E62C3D47AF03}'
+		}
+	}
+}
