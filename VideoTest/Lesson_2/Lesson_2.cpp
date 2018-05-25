@@ -17,6 +17,56 @@ extern "C"
 
 using namespace std;
 
+// 编码封装
+BOOL encode(AVFormatContext *pFormatCtx, AVCodecContext *pCodecCtx, AVFrame *picture, AVPacket *pkt)
+{
+	BOOL result = TRUE;
+	int err = 0;
+	
+	//编码  
+	err = avcodec_send_frame(pCodecCtx, picture);
+	if (err < 0)
+	{
+		ExceptionLog::InputLog("avcodec_send_frame err");
+		result = FALSE;
+	}
+	else
+	{
+		while (1)
+		{
+			err = avcodec_receive_packet(pCodecCtx, pkt);
+			if (err == AVERROR(EAGAIN) || err == AVERROR_EOF)
+			{
+				ExceptionLog::InputLog("avcodec_receive_packet err %d", err);
+				break;
+			}
+			else if (err < 0)
+			{
+				ExceptionLog::InputLog("Error during encoding");
+				fprintf(stderr, "Error during encoding\n");
+				result = FALSE;
+			}
+			else
+			{
+				pkt->stream_index = 0;
+				av_packet_rescale_ts(pkt, pFormatCtx->streams[pkt->stream_index]->time_base,
+					pFormatCtx->streams[0]->time_base);
+				err = av_interleaved_write_frame(pFormatCtx, pkt);
+				if (err < 0)
+				{
+					ExceptionLog::InputLog("av_interleaved_write_frame ERR %d", err);
+					result = FALSE;
+					break;
+				}
+
+				av_packet_unref(pkt);
+			}
+		}
+	}
+
+	return result;
+}
+
 int main(int argc, char *argv[])
 {
 	ExceptionLog::ConfigLog(NULL, L"Lesson_2异常报告.txt");
@@ -25,16 +75,16 @@ int main(int argc, char *argv[])
 
 	//打开视频文件  
 	FILE *in_file = nullptr;
-	fopen_s(&in_file, "E://22.yuv", "rb");
+	fopen_s(&in_file, "E:\\akiyo_qcif.yuv", "rb");
 	if (!in_file)
 	{
 		ExceptionLog::InputLog("fopen_s err");
 		result = FALSE;
 	}
 
-	int in_w = 160, in_h = 120;
-	int framenum = 50;
-	const char* out_file = "E://22.mp4";
+	int in_w = 176, in_h = 144;
+	int framenum = 300;
+	const char* out_file = "E:\\22.mp4";
 
 	// 过程起始位置
 	AVFormatContext *pFormatCtx = nullptr;
@@ -90,7 +140,7 @@ int main(int argc, char *argv[])
 					{
 						pCodecCtx->qmin = 10;
 						pCodecCtx->qmax = 51;
-						pCodecCtx->qcompress = 0.6;
+						pCodecCtx->qcompress = 0.6f;
 					}
 
 					if (pCodecCtx->codec_id == AV_CODEC_ID_MPEG2VIDEO)
@@ -115,6 +165,7 @@ int main(int argc, char *argv[])
 						}
 						else
 						{
+							err = avcodec_parameters_from_context(video_st->codecpar, pCodecCtx);
 							av_dump_format(pFormatCtx, 0, out_file, 1);
 
 							AVFrame *picture = av_frame_alloc(); // 分配数据帧
@@ -139,69 +190,37 @@ int main(int argc, char *argv[])
 								else
 								{
 									err = avformat_write_header(pFormatCtx, NULL);
+									
+										AVPacket pkt = { 0 };
+										int y_size = pCodecCtx->width * pCodecCtx->height;
+										av_new_packet(&pkt, size * 3);
 
-									AVPacket pkt = {0};
-									int y_size = pCodecCtx->width * pCodecCtx->height;
-									av_new_packet(&pkt, size * 3);
-
-									for (int i = 0; i < framenum; i++)
-									{
-										//读入YUV  
-										if (fread(picture_buf, 1, y_size * 3 / 2, in_file)<0)
+										for (int i = 0; i < framenum; i++)
 										{
-											ExceptionLog::InputLog("read file fail!");
-											result = FALSE;
-											break;
-										}
-										else if (feof(in_file))
-											break;
+											if (fread(picture_buf, 1, y_size * 3 / 2, in_file)<0)
+											{
+												cout << "read file fail!" << endl;
+												return 0;
+											}
+											else if (feof(in_file))
+												break;
 
-										picture->data[0] = picture_buf; //亮度Y  
-										picture->data[1] = picture_buf + y_size; //U  
-										picture->data[2] = picture_buf + y_size * 5 / 4; //V  
-																						 //AVFrame PTS  
-										picture->pts = i;
-										int got_picture = 0;
+											picture->data[0] = picture_buf; //亮度Y  
+											picture->data[1] = picture_buf + y_size; //U  
+											picture->data[2] = picture_buf + y_size * 5 / 4; //V  
+																							 
+											//AVFrame PTS  
+											picture->pts = i;
+											int got_picture = 0;
 
-										//编码  
-										int ret = avcodec_send_frame(pCodecCtx, picture);
-										if (ret < 0)
-										{
-											ExceptionLog::InputLog("Error sending a frame for encoding");
-											result = TRUE;
-											break;
-										}
-										int ret = avcodec_encode_video2(pCodecCtx, &pkt, picture, &got_picture);
-										if (ret<0)
-										{
-											ExceptionLog::InputLog("encoder fail!");
-											result = FALSE;
-											break;
+											result = encode(pFormatCtx, pCodecCtx, picture, &pkt);
 										}
 
-										if (got_picture == 1)
-										{
-											cout << "encoder success!" << endl;
+										result = encode(pFormatCtx, pCodecCtx, picture, &pkt);
 
-											// parpare packet for muxing  
-											pkt.stream_index = video_st->index;
-											av_packet_rescale_ts(&pkt, pCodecCtx->time_base, video_st->time_base);
-											pkt.pos = -1;
-											ret = av_interleaved_write_frame(pFormatCtx, &pkt);
-											av_free_packet(&pkt);
-										}
-									}
-
-									int ret = flush_encoder(pFormatCtx, 0);
-									if (ret < 0)
-									{
-										cout << "flushing encoder failed!" << endl;
-										goto end;
-									}
-									//[9]  
-
-									//[10] --写文件尾  
-									av_write_trailer(pFormatCtx);
+										//[10] --写文件尾  
+										err = av_write_trailer(pFormatCtx);
+									
 
 								}
 								av_free(picture_buf);
