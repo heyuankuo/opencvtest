@@ -433,7 +433,7 @@ int init_filters(void)
 	return 0;
 }
 
-int encode_write_frame(AVFrame *frame, unsigned int stream_index, int *got_frame)
+int encode_write_frame(AVFrame *frame, unsigned int stream_index)
 {
 	int ret = 0;
 	
@@ -456,8 +456,12 @@ int encode_write_frame(AVFrame *frame, unsigned int stream_index, int *got_frame
 	while (1)
 	{
 		ret = avcodec_receive_packet(stream_ctx[stream_index].enc_ctx, &enc_pkt);
-		if (ret)
+		if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+		{
+			av_log(NULL, AV_LOG_INFO, "Error avcodec_receive_packet "
+				"Error code: %s\n", av_err2str(ret));
 			break;
+		}
 
 		enc_pkt.stream_index = 0;
 		av_packet_rescale_ts(&enc_pkt, ifmt_ctx->streams[stream_index]->time_base,
@@ -507,7 +511,7 @@ int decode_write_frame(AVPacket *pkt, unsigned int stream_index)
 			goto fail;
 		}
 
-
+		encode_write_frame(frame, stream_index);
 
 	fail:
 		av_frame_free(&frame);
@@ -556,7 +560,7 @@ int filter_encode_write_frame(AVFrame *frame, unsigned int stream_index)
 		}
 
 		filt_frame->pict_type = AV_PICTURE_TYPE_NONE;
-		ret = encode_write_frame(filt_frame, stream_index, NULL);
+		ret = encode_write_frame(filt_frame, stream_index);
 		if (ret < 0)
 			break;
 	}
@@ -574,8 +578,6 @@ int main()
 	int stream_index = 0;
 	enum AVMediaType type;
 	AVFrame *frame = NULL;
-	int(*dec_func)(AVCodecContext *, AVFrame *, int *, const AVPacket *);
-	int got_frame;
 
 	while (1)
 	{
@@ -597,20 +599,6 @@ int main()
 
 		// ½âÂë/ÖØ±àÂë
 		ret = decode_write_frame(&packet, stream_index);
-
-		if (got_frame)
-		{
-			frame->pts = frame->best_effort_timestamp;
-			ret = filter_encode_write_frame(frame, stream_index);
-			av_frame_free(&frame);
-			if (ret < 0)
-				return 0;
-				//goto end;
-		}
-		else
-		{
-			av_frame_free(&frame);
-		}
 
 	}
     return 0;

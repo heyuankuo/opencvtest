@@ -8,234 +8,240 @@
 
 extern "C"
 {
-#include <libavcodec/avcodec.h>  
-#include <libavformat/avformat.h>  
-#include <libavutil/avutil.h>  
-#include <libswscale/swscale.h>  
-#include <libavutil/imgutils.h>
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
+#include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 }
 
-using namespace std;
+AVFormatContext *ifmt_ctx;
+AVFormatContext *ofmt_ctx;
 
-// 编码封装
-BOOL encode(AVFormatContext *pFormatCtx, AVCodecContext *pCodecCtx, AVFrame *picture, AVPacket *pkt)
+typedef struct StreamContext
 {
-	BOOL result = TRUE;
-	int err = 0;
-	
-	//编码  
-	err = avcodec_send_frame(pCodecCtx, picture);
-	if (err < 0)
+	AVCodecContext *dec_ctx;
+	AVCodecContext *enc_ctx;
+} StreamContext;
+StreamContext *stream_ctx;
+
+BOOL g_efftstr[8] = { FALSE };
+
+// 打开输入文件
+int open_input_file(const char *filename)
+{
+	int ret;
+	unsigned int i;
+
+	ifmt_ctx = NULL;
+	if ((ret = avformat_open_input(&ifmt_ctx, filename, NULL, NULL)) < 0)
 	{
-		ExceptionLog::InputLog("avcodec_send_frame err");
-		result = FALSE;
+		av_log(NULL, AV_LOG_ERROR, "Cannot open input file\n");
+		return ret;
 	}
-	else
+
+	if ((ret = avformat_find_stream_info(ifmt_ctx, NULL)) < 0)
 	{
-		while (1)
+		av_log(NULL, AV_LOG_ERROR, "Cannot find stream information\n");
+		return ret;
+	}
+
+	stream_ctx = (StreamContext *)av_mallocz_array(ifmt_ctx->nb_streams, sizeof(StreamContext));
+	if (!stream_ctx)
+		return AVERROR(ENOMEM);
+
+	for (i = 0; i < ifmt_ctx->nb_streams; i++)
+	{
+		AVStream *stream = ifmt_ctx->streams[i];
+		AVCodec *dec = avcodec_find_decoder(stream->codecpar->codec_id);
+		AVCodecContext *codec_ctx;
+		if (!dec)
 		{
-			err = avcodec_receive_packet(pCodecCtx, pkt);
-			if (err == AVERROR(EAGAIN) || err == AVERROR_EOF)
+			av_log(NULL, AV_LOG_ERROR, "Failed to find decoder for stream #%u\n", i);
+			continue;
+			// return AVERROR_DECODER_NOT_FOUND;
+		}
+		codec_ctx = avcodec_alloc_context3(dec);
+		if (!codec_ctx)
+		{
+			av_log(NULL, AV_LOG_ERROR, "Failed to allocate the decoder context for stream #%u\n", i);
+			return AVERROR(ENOMEM);
+		}
+		ret = avcodec_parameters_to_context(codec_ctx, stream->codecpar);
+		if (ret < 0)
+		{
+			av_log(NULL, AV_LOG_ERROR, "Failed to copy decoder parameters to input decoder context "
+				"for stream #%u\n", i);
+			return ret;
+		}
+		/* Reencode video & audio and remux subtitles etc. */
+		if (codec_ctx->codec_type == AVMEDIA_TYPE_VIDEO
+			|| codec_ctx->codec_type == AVMEDIA_TYPE_AUDIO)
+		{
+			if (codec_ctx->codec_type == AVMEDIA_TYPE_VIDEO)
+				codec_ctx->framerate = av_guess_frame_rate(ifmt_ctx, stream, NULL);
+			/* Open decoder */
+			ret = avcodec_open2(codec_ctx, dec, NULL);
+			if (ret < 0)
 			{
-				ExceptionLog::InputLog("avcodec_receive_packet err %d", err);
-				break;
+				av_log(NULL, AV_LOG_ERROR, "Failed to open decoder for stream #%u\n", i);
+				return ret;
 			}
-			else if (err < 0)
+		}
+		stream_ctx[i].dec_ctx = codec_ctx;
+		g_efftstr[i] = TRUE;
+	}
+
+	av_dump_format(ifmt_ctx, 0, filename, 0);
+	return 0;
+}
+
+int open_output_file(const char *filename)
+{
+	AVCodecContext *dec_ctx, *enc_ctx;
+	AVCodec *encoder;
+	int ret;
+	unsigned int i;
+
+	ofmt_ctx = NULL;
+	avformat_alloc_output_context2(&ofmt_ctx, NULL, NULL, filename);
+	if (!ofmt_ctx)
+	{
+		av_log(NULL, AV_LOG_ERROR, "Could not create output context\n");
+		return AVERROR_UNKNOWN;
+	}
+
+	AVStream *out_stream = NULL;
+	AVStream *in_stream = NULL;
+	for (i = 0; i < ifmt_ctx->nb_streams; i++)
+	{
+		if (FALSE == g_efftstr[i])
+			continue;
+
+		out_stream = avformat_new_stream(ofmt_ctx, NULL);
+		if (!out_stream)
+		{
+			av_log(NULL, AV_LOG_ERROR, "Failed allocating output stream\n");
+			return AVERROR_UNKNOWN;
+		}
+
+		in_stream = ifmt_ctx->streams[i];
+		dec_ctx = stream_ctx[i].dec_ctx;
+
+		if (dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO
+			|| dec_ctx->codec_type == AVMEDIA_TYPE_AUDIO)
+		{
+			/* in this example, we choose transcoding to same codec */
+			encoder = avcodec_find_encoder(dec_ctx->codec_id);
+			if (!encoder)
 			{
-				ExceptionLog::InputLog("Error during encoding");
-				fprintf(stderr, "Error during encoding\n");
-				result = FALSE;
+				av_log(NULL, AV_LOG_FATAL, "Necessary encoder not found\n");
+				return AVERROR_INVALIDDATA;
+			}
+			enc_ctx = avcodec_alloc_context3(encoder);
+			if (!enc_ctx)
+			{
+				av_log(NULL, AV_LOG_FATAL, "Failed to allocate the encoder context\n");
+				return AVERROR(ENOMEM);
+			}
+
+			/* In this example, we transcode to same properties (picture size,
+			* sample rate etc.). These properties can be changed for output
+			* streams easily using filters */
+			if (dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO)
+			{
+				enc_ctx->height = dec_ctx->height;
+				enc_ctx->width = dec_ctx->width;
+				enc_ctx->sample_aspect_ratio = dec_ctx->sample_aspect_ratio;
+				/* take first format from list of supported formats */
+				if (encoder->pix_fmts)
+					enc_ctx->pix_fmt = encoder->pix_fmts[0];
+				else
+					enc_ctx->pix_fmt = dec_ctx->pix_fmt;
+				/* video time_base can be set to whatever is handy and supported by encoder */
+				enc_ctx->time_base = av_inv_q(dec_ctx->framerate);
 			}
 			else
 			{
-				pkt->stream_index = 0;
-				av_packet_rescale_ts(pkt, pFormatCtx->streams[pkt->stream_index]->time_base,
-					pFormatCtx->streams[0]->time_base);
-				err = av_interleaved_write_frame(pFormatCtx, pkt);
-				if (err < 0)
-				{
-					ExceptionLog::InputLog("av_interleaved_write_frame ERR %d", err);
-					result = FALSE;
-					break;
-				}
-
-				av_packet_unref(pkt);
+				enc_ctx->sample_rate = dec_ctx->sample_rate;
+				enc_ctx->channel_layout = dec_ctx->channel_layout;
+				enc_ctx->channels = av_get_channel_layout_nb_channels(enc_ctx->channel_layout);
+				/* take first format from list of supported formats */
+				enc_ctx->sample_fmt = encoder->sample_fmts[0];
+				enc_ctx->time_base = { 1, enc_ctx->sample_rate };
 			}
+
+			/* Third parameter can be used to pass settings to encoder */
+			ret = avcodec_open2(enc_ctx, encoder, NULL);
+			if (ret < 0)
+			{
+				av_log(NULL, AV_LOG_ERROR, "Cannot open video encoder for stream #%u\n", i);
+				return ret;
+			}
+			ret = avcodec_parameters_from_context(out_stream->codecpar, enc_ctx);
+			if (ret < 0)
+			{
+				av_log(NULL, AV_LOG_ERROR, "Failed to copy encoder parameters to output stream #%u\n", i);
+				return ret;
+			}
+			if (ofmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)
+				enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
+			out_stream->time_base = enc_ctx->time_base;
+			stream_ctx[i].enc_ctx = enc_ctx;
+		}
+		else if (dec_ctx->codec_type == AVMEDIA_TYPE_UNKNOWN)
+		{
+			av_log(NULL, AV_LOG_FATAL, "Elementary stream #%d is of unknown type, cannot proceed\n", i);
+			return AVERROR_INVALIDDATA;
+		}
+		else
+		{
+			/* if this stream must be remuxed */
+			ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
+			if (ret < 0)
+			{
+				av_log(NULL, AV_LOG_ERROR, "Copying parameters for stream #%u failed\n", i);
+				return ret;
+			}
+			out_stream->time_base = in_stream->time_base;
+		}
+
+	}
+	av_dump_format(ofmt_ctx, 0, filename, 1);
+
+	if (!(ofmt_ctx->oformat->flags & AVFMT_NOFILE))
+	{
+		ret = avio_open(&ofmt_ctx->pb, filename, AVIO_FLAG_WRITE);
+		if (ret < 0)
+		{
+			av_log(NULL, AV_LOG_ERROR, "Could not open output file '%s'", filename);
+			return ret;
 		}
 	}
 
-	return result;
+	/* init muxer, write output file header */
+	ret = avformat_write_header(ofmt_ctx, NULL);
+	if (ret < 0)
+	{
+		av_log(NULL, AV_LOG_ERROR, "Error occurred when opening output file\n");
+		return ret;
+	}
+
+	return 0;
 }
 
 int main(int argc, char *argv[])
 {
-	ExceptionLog::ConfigLog(NULL, L"Lesson_2异常报告.txt");
-	BOOL result = TRUE;
-	int err = 0;
+	int ret = 0;
+	ret = open_input_file("E:\\akiyo_qcif.yuv"); 
+	ret = open_output_file("E:\\ceshi.mp4");
 
-	//打开视频文件  
-	FILE *in_file = nullptr;
-	fopen_s(&in_file, "E:\\akiyo_qcif.yuv", "rb");
-	if (!in_file)
-	{
-		ExceptionLog::InputLog("fopen_s err");
-		result = FALSE;
-	}
-
-	int in_w = 176, in_h = 144;
-	int framenum = 300;
-	const char* out_file = "E:\\22.mp4";
-
-	// 过程起始位置
-	AVFormatContext *pFormatCtx = nullptr;
-	err = avformat_alloc_output_context2(&pFormatCtx, NULL, NULL, out_file);
-	if (err < 0)
-	{
-		ExceptionLog::InputLog("avformat_alloc_output_context2 err %d", err);
-		result = FALSE;
-	}
-	else
-	{
-		AVOutputFormat *fmt = nullptr;
-		fmt = pFormatCtx->oformat;
-		err = avio_open(&pFormatCtx->pb, out_file, AVIO_FLAG_READ_WRITE);
-		if ( err < 0)
-		{
-			ExceptionLog::InputLog("avio_open err %d", err);
-			result = FALSE;
-		}
-		else
-		{
-			AVStream *video_st = nullptr;
-			video_st = avformat_new_stream(pFormatCtx, 0);
-			if (nullptr == video_st)
-			{
-				ExceptionLog::InputLog("avformat_new_stream err %d");
-				result = FALSE;
-			}
-			else
-			{
-				video_st->time_base = {1, 25};
-
-				AVCodecContext *pCodecCtx = avcodec_alloc_context3(nullptr);
-				if (nullptr == pCodecCtx)
-				{
-					ExceptionLog::InputLog("pCodecCtx 创建失败 err");
-					result = FALSE;
-				}
-				else
-				{
-					avcodec_parameters_to_context(pCodecCtx, video_st->codecpar);
-					pCodecCtx->codec_id = fmt->video_codec;
-					pCodecCtx->codec_type = AVMEDIA_TYPE_VIDEO;
-					pCodecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
-					pCodecCtx->width = in_w;
-					pCodecCtx->height = in_h;
-					pCodecCtx->time_base.num = 1;
-					pCodecCtx->time_base.den = 25;
-					pCodecCtx->bit_rate = 400000;
-					pCodecCtx->gop_size = 10;
-
-					if (pCodecCtx->codec_id == AV_CODEC_ID_H264)
-					{
-						pCodecCtx->qmin = 10;
-						pCodecCtx->qmax = 51;
-						pCodecCtx->qcompress = 0.6f;
-					}
-
-					if (pCodecCtx->codec_id == AV_CODEC_ID_MPEG2VIDEO)
-						pCodecCtx->max_b_frames = 2;
-					if (pCodecCtx->codec_id == AV_CODEC_ID_MPEG1VIDEO)
-						pCodecCtx->mb_decision = 2;
-
-					AVCodec *pCodec = nullptr;
-					pCodec = avcodec_find_encoder(pCodecCtx->codec_id);
-					if (!pCodec)
-					{
-						ExceptionLog::InputLog("avcodec_find_encoder err");
-						result = FALSE;
-					}
-					else
-					{
-						err = avcodec_open2(pCodecCtx, pCodec, NULL);
-						if (err < 0 )
-						{
-							ExceptionLog::InputLog("avcodec_open2 err");
-							result = FALSE;
-						}
-						else
-						{
-							err = avcodec_parameters_from_context(video_st->codecpar, pCodecCtx);
-							av_dump_format(pFormatCtx, 0, out_file, 1);
-
-							AVFrame *picture = av_frame_alloc(); // 分配数据帧
-							picture->width = pCodecCtx->width;
-							picture->height = pCodecCtx->height;
-							picture->format = pCodecCtx->pix_fmt;
-							int size = av_image_get_buffer_size(pCodecCtx->pix_fmt, pCodecCtx->width, pCodecCtx->height, 1);
-							if (size < 1)
-							{
-								ExceptionLog::InputLog("av_image_get_buffer_size err %d", size);
-								result = FALSE;
-							}
-							else
-							{
-								uint8_t *picture_buf = (uint8_t*)av_malloc(size);
-								err = av_image_fill_arrays(picture->data, picture->linesize, picture_buf, pCodecCtx->pix_fmt, pCodecCtx->width, pCodecCtx->height, 1);
-								if (err < 0)
-								{
-									ExceptionLog::InputLog("av_image_fill_arrays err %d", err);
-									result = FALSE;
-								}
-								else
-								{
-									err = avformat_write_header(pFormatCtx, NULL);
-									
-										AVPacket pkt = { 0 };
-										int y_size = pCodecCtx->width * pCodecCtx->height;
-										av_new_packet(&pkt, size * 3);
-
-										for (int i = 0; i < framenum; i++)
-										{
-											if (fread(picture_buf, 1, y_size * 3 / 2, in_file)<0)
-											{
-												cout << "read file fail!" << endl;
-												return 0;
-											}
-											else if (feof(in_file))
-												break;
-
-											picture->data[0] = picture_buf; //亮度Y  
-											picture->data[1] = picture_buf + y_size; //U  
-											picture->data[2] = picture_buf + y_size * 5 / 4; //V  
-																							 
-											//AVFrame PTS  
-											picture->pts = i;
-											int got_picture = 0;
-
-											result = encode(pFormatCtx, pCodecCtx, picture, &pkt);
-										}
-
-										result = encode(pFormatCtx, pCodecCtx, picture, &pkt);
-
-										//[10] --写文件尾  
-										err = av_write_trailer(pFormatCtx);
-									
-
-								}
-								av_free(picture_buf);
-								av_free(picture);
-							}
-	
-						}
-					}
-					
-				}
-			}
-		}
-		avio_close(pFormatCtx->pb);
-		avformat_free_context(pFormatCtx);
-	}
+	AVPacket packet = { 0 };
+	int stream_index = 0;
+	enum AVMediaType type;
+	AVFrame *frame = NULL;
 	
 	return 0;
 }
